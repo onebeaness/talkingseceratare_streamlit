@@ -57,7 +57,7 @@ if audio_data:
                 audio_bytes_data = f.read()
 
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.6-flash',
                 contents=[
                     "사용자의 음성 입력입니다. 질문에 한국어로 친절하게 답변해주세요.",
                     genai.types.Part.from_bytes(data=audio_bytes_data, mime_type="audio/wav")

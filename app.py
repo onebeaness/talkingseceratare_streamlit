@@ -20,11 +20,11 @@ with st.sidebar:
     
     st.divider()
     
-    # 모델 선택 라디오 버튼
+# [수정] 현재 지원되는 최신 모델 라인업으로 구성된 모델 선택 라디오 버튼
     selected_model = st.radio(
         "사용할 Gemini 모델 선택",
-        options=["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"],
-        index=0
+        options=["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
+        index=0  # 기본값으로 가장 최신 모델 선택
     )
 
 if not api_key:

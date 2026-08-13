@@ -6,7 +6,7 @@ import tempfile
 from streamlit_mic_recorder import mic_recorder
 
 # 1. Streamlit 페이지 기본 설정
-st.set_page_config(page_title="Gemini 음성 비서", page_icon="🎙️")
+st.set_page_config(page_title="점잖은 선비", page_icon="🎙️")
 st.title("🎙️ Gemini 실시간 음성 비서")
 
 # ==========================================

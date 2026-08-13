@@ -7,7 +7,7 @@ from streamlit_mic_recorder import mic_recorder
 
 # 1. Streamlit 페이지 기본 설정
 st.set_page_config(page_title="점잖은 선비", page_icon="🎙️")
-st.title("🎙️ Gemini 실시간 음성 비서")
+st.title("점잖은 선비")
 
 # ==========================================
 # 2. 사이드바 설정 (API 키 입력 및 모델 선택)

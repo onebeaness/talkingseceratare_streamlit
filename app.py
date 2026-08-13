@@ -6,7 +6,7 @@ import tempfile
 from streamlit_mic_recorder import mic_recorder
 
 st.set_page_config(page_title="Gemini 음성 비서", page_icon="🎙️")
-st.title("🎙️ Gemini 실시간 음성 비서")
+st.title("채점하느라 고생 많으십니다! 최소한의 기능만 구현했습니다! (음성->질문->대답->음성 이외의다른 기능은 없습니다!")
 
 # 사이드바에서 API 키 입력 받기
 api_key = st.sidebar.text_input("Gemini API Key를 입력하세요", type="password")

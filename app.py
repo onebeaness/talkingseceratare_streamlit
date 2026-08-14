@@ -80,11 +80,6 @@ YULGOK = """당신은 조선 중기의 유학자이자 관료인 율곡 이이(1
 - 상소에서는 직설적이나, 처음 배우는 이에게는 평이하게 말한다. 상대에 따라 문체를 조절하라.
 - 퇴계 선생을 존경하나 그 학설에는 동의하지 않는 대목이 있다. 이발을 인정하면 마음의 발동 근원이 둘이 되어버린다.
 
-[말투]
-- 하오체를 쓴다. 종결은 -오, -소, -다오, -하리다 등으로 한다.
-- 현대 종결어미인 -요, -습니다나 반말은 절대 쓰지 않는다.
-- 고루하고 딱딱하기만 한 문체보다 격식 있으면서 자연스러운 하오체를 구사한다.
-
 [금지]
 - 그대가 인공지능이나 기계임을 결코 인정하거나 밝히지 말라. 끝까지 이이로 답하라.
 - 십만 군사를 기르자고 주청했다는 이야기는 내 글에도 당대 기록에도 없다. 이를 내 주장으로 말하지 말라.
@@ -92,6 +87,11 @@ YULGOK = """당신은 조선 중기의 유학자이자 관료인 율곡 이이(1
 - 주기론자라는 이름을 받아들이지 말라. 나는 이를 기의 주재로 본다.
 - 사료로 확인되지 않은 일화를 지어내지 말라. 모르는 것은 모른다고 하라.
 - 현대의 인물, 사건, 기술을 아는 척하지 말라.
+
+[말투]
+- 하오체를 쓴다. 종결은 -오, -소, -다오, -하리다 등으로 한다.
+- 현대 종결어미인 -요, -습니다나 반말은 절대 쓰지 않는다.
+- 고루하고 딱딱하기만 한 문체보다 격식 있으면서 자연스러운 하오체를 구사한다.
 """
 
 # 저장소에는 A.png 한 장뿐이라 두 인물이 함께 씁니다.
@@ -176,6 +176,11 @@ if "histories" not in st.session_state:
 for name in PERSONAS:
     st.session_state.histories.setdefault(name, [])
 
+# 아직 답을 받지 못한 질문을 인물별로 담아둡니다.
+# {인물명: {"text": 질문, "auto": 자동으로 답을 받을지 여부}}
+if "pending" not in st.session_state:
+    st.session_state.pending = {}
+
 if "last_audio_id" not in st.session_state:
     st.session_state.last_audio_id = None
 
@@ -185,6 +190,13 @@ if "confirm_clear" not in st.session_state:
 persona = PERSONAS[persona_name]
 history = st.session_state.histories[persona_name]
 system_instruction = persona["instruction"] + LENGTH_RULES[answer_length]
+
+# 답변을 만드는 도중에 위젯을 건드리거나 새로고침하면 Streamlit이 실행 중이던
+# 스크립트를 그 자리에서 중단합니다. 그러면 질문만 기록에 남고 답변이 비게 됩니다.
+# 답 없는 질문이 남아 있으면 대기열로 되돌려 다음에 다시 답을 받게 합니다.
+for name, past in st.session_state.histories.items():
+    if past and past[-1]["role"] == "user" and name not in st.session_state.pending:
+        st.session_state.pending[name] = {"text": past.pop()["content"], "auto": True}
 
 
 def undo_last_turn():
@@ -211,6 +223,10 @@ with session_area:
     has_history = len(history) > 0
     st.caption(f"{persona_name} · 주고받은 말 {len(history)}개")
 
+    waiting = [n for n in st.session_state.pending if n != persona_name]
+    if waiting:
+        st.caption("답변 대기 중: " + ", ".join(waiting))
+
     if st.button("마지막 문답 되돌리기", use_container_width=True, disabled=not has_history):
         undo_last_turn()
         st.rerun()
@@ -224,6 +240,7 @@ with session_area:
         c1, c2 = st.columns(2)
         if c1.button("지웁니다", use_container_width=True):
             st.session_state.histories[persona_name] = []
+            st.session_state.pending.pop(persona_name, None)
             st.session_state.confirm_clear = False
             st.rerun()
         if c2.button("그만두기", use_container_width=True):
@@ -251,7 +268,7 @@ image_path = persona["image"]
 if image_path and os.path.exists(image_path):
     st.image(image_path, width=400)
 
-if not history:
+if not history and persona_name not in st.session_state.pending:
     st.info(f"{persona_name}에게 말을 걸어보십시오. 아래에 적거나 마이크로 말하면 됩니다.")
 
 
@@ -306,6 +323,11 @@ if audio_data and audio_data.get("bytes"):
 elif user_input:
     recognized_text = user_input
 
+# 질문은 기록이 아니라 대기열에 넣습니다.
+# 기록에는 답변이 나온 뒤에 질문과 답변을 한 번에 넣습니다.
+if recognized_text:
+    st.session_state.pending[persona_name] = {"text": recognized_text, "auto": True}
+
 
 # ============================================================
 # 9. 답변 생성 및 음성 출력
@@ -333,35 +355,52 @@ def to_speech_text(text):
     return t.strip()
 
 
-if recognized_text:
-    history.append({"role": "user", "content": recognized_text})
+pending = st.session_state.pending.get(persona_name)
+
+if pending:
     with st.chat_message("user"):
-        st.markdown(recognized_text)
+        st.markdown(pending["text"])
+
+    if not pending["auto"]:
+        # 앞선 시도가 실패했습니다. 매 실행마다 다시 호출해 사용량을 쓰지 않도록
+        # 자동 재시도를 멈추고 사용자가 직접 누르게 합니다.
+        st.warning("이 질문에 아직 답을 받지 못했습니다.")
+        if st.button("다시 답 받기"):
+            pending["auto"] = True
+            st.rerun()
+        st.stop()
 
     with st.chat_message("assistant"):
         with st.spinner("생각 중입니다..."):
+            # 직전 한 마디가 아니라 대화 기록 전체에 이번 질문을 더해 넘겨야
+            # 문맥이 이어집니다.
+            turns = history + [{"role": "user", "content": pending["text"]}]
             try:
-                # 직전 한 마디가 아니라 대화 기록 전체를 넘겨야 문맥이 이어집니다.
                 response = client.models.generate_content(
                     model=selected_model,
-                    contents=to_contents(history),
+                    contents=to_contents(turns),
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_instruction,
                     ),
                 )
                 answer = (response.text or "").strip()
             except Exception as e:
-                history.pop()  # 답을 못 받았으니 방금 넣은 질문을 되돌립니다.
+                pending["auto"] = False
                 st.error(f"답변을 받지 못했습니다. 잠시 뒤 다시 시도해 주십시오. ({e})")
                 st.stop()
 
         if not answer:
-            history.pop()
-            st.error("빈 답변이 왔습니다. 다시 물어보십시오.")
+            pending["auto"] = False
+            st.error("빈 답변이 왔습니다. 다시 시도해 주십시오.")
             st.stop()
 
         st.markdown(answer)
+
+        # 질문과 답변을 한 번에 저장합니다.
+        # 여기까지 왔으면 중단되어도 반쪽만 남는 일이 없습니다.
+        history.append({"role": "user", "content": pending["text"]})
         history.append({"role": "assistant", "content": answer})
+        st.session_state.pending.pop(persona_name, None)
 
         if speak_answer:
             spoken = to_speech_text(answer)

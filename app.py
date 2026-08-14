@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import re
@@ -117,6 +118,60 @@ LENGTH_RULES = {
     "열 문장 이내": "\n[분량]\n한 번에 열 문장을 넘기지 말라. 세 문단 이내로 하라.\n",
 }
 
+# 계정에서 실제로 쓸 수 있는 모델만 보여줍니다.
+# 이름을 코드에 박아두면 계정에서 지원이 끊겼을 때 대화를 시도한 순간에야
+# 404가 나서 원인을 알기 어렵습니다. 2.5 계열이 신규 계정에서 막힌 사례가 있습니다.
+FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.5-flash"]
+
+# 값싼 순서. 여기 없는 모델은 뒤에 붙되 flash-lite, flash 순으로 정렬합니다.
+CHEAP_FIRST = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+]
+
+# 대화에 쓸 수 없는 계열을 걸러냅니다.
+SKIP_KEYWORDS = ("image", "tts", "embedding", "veo", "imagen", "lyria", "live")
+
+
+def _cheapness(name):
+    if "flash-lite" in name:
+        return 0
+    if "flash" in name:
+        return 1
+    return 2
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def available_models(key_id, _api_key):
+    """계정이 쓸 수 있는 대화용 모델을 저렴한 순으로 돌려줍니다.
+
+    key_id는 캐시 구분용 해시이고, 밑줄로 시작하는 _api_key는
+    Streamlit이 캐시 키에서 제외합니다.
+    """
+    try:
+        found = []
+        for m in genai.Client(api_key=_api_key).models.list():
+            name = str(getattr(m, "name", "")).split("/")[-1]
+            if not name.startswith("gemini"):
+                continue
+            if any(s in name for s in SKIP_KEYWORDS):
+                continue
+            actions = getattr(m, "supported_actions", None)
+            if actions and "generateContent" not in actions:
+                continue
+            found.append(name)
+    except Exception as e:
+        return FALLBACK_MODELS, f"모델 목록을 불러오지 못해 기본 목록을 씁니다. ({e})"
+
+    if not found:
+        return FALLBACK_MODELS, "쓸 수 있는 모델을 찾지 못해 기본 목록을 씁니다."
+
+    ordered = [n for n in CHEAP_FIRST if n in found]
+    ordered += sorted((n for n in found if n not in ordered), key=lambda n: (_cheapness(n), n))
+    return ordered, None
+
 
 # ============================================================
 # 2. 페이지 기본 설정
@@ -131,18 +186,24 @@ st.set_page_config(page_title="점잖은 선비", page_icon="🎙️")
 
 with st.sidebar:
     st.header("설정")
-
     api_key = st.text_input("Gemini API Key를 입력하세요", type="password")
 
+# 모델 목록을 받으려면 키가 필요하므로 여기서 한 번 끊습니다.
+if not api_key:
+    st.warning("왼쪽 사이드바에 AI Studio에서 발급받은 API 키를 입력해주세요.")
+    st.stop()
+
+with st.sidebar:
     st.divider()
 
-    # 기본값은 가장 저렴한 모델입니다. 답변 품질이 아쉬우면 아래 항목으로 올리십시오.
-    selected_model = st.radio(
-        "사용할 Gemini 모델 선택",
-        options=["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.5-flash"],
-        index=0,
+    model_options, model_note = available_models(
+        hashlib.sha256(api_key.encode()).hexdigest()[:16], api_key
     )
-    st.caption("flash-lite가 가장 저렴합니다. 음성 입력은 텍스트보다 토큰 단가가 높습니다.")
+    # 목록이 저렴한 순이므로 첫 항목이 가장 싼 모델입니다.
+    selected_model = st.radio("사용할 Gemini 모델 선택", options=model_options, index=0)
+    st.caption("계정에서 쓸 수 있는 모델만 저렴한 순으로 보여줍니다. 음성 입력은 텍스트보다 토큰 단가가 높습니다.")
+    if model_note:
+        st.caption(model_note)
 
     persona_name = st.radio(
         "대화할 인물",
@@ -161,10 +222,6 @@ with st.sidebar:
     st.divider()
     st.subheader("대화 관리")
     session_area = st.container()  # 버튼은 세션 상태를 만든 뒤 아래에서 그립니다.
-
-if not api_key:
-    st.warning("왼쪽 사이드바에 AI Studio에서 발급받은 API 키를 입력해주세요.")
-    st.stop()
 
 
 # ============================================================

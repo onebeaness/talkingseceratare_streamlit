@@ -1,9 +1,11 @@
+import base64
 import hashlib
 import io
 import json
 import os
 import re
 import secrets
+import wave
 
 import streamlit as st
 from google import genai
@@ -104,13 +106,41 @@ PERSONAS = {
         "image": "A.png",
         "caption": "이와 기는 섞이지 않소. 사단은 이가 발하는 것이오.",
         "instruction": TOEGYE,
+        "voice": "Sadaltager",  # 문서가 한국어 예시로 드는 목소리. 학자 어조에 맞습니다.
+        "direction": (
+            "Style: A seventy-year-old Korean Confucian scholar who has withdrawn "
+            "from court to teach by a mountain stream. Grave, unhurried, warm toward "
+            "a younger student. He weighs each word before releasing it.\n"
+            "Pacing: Slow. Full stops are long. He pauses before the important clause.\n"
+            "Delivery: Low register, even volume, no theatrical emphasis."
+        ),
     },
     "율곡 이이": {
         "image": "A.png",
         "caption": "발하는 것은 기요, 이는 그 위에 타는 것이오. 지금은 경장할 때요.",
         "instruction": YULGOK,
+        "voice": "Orus",  # 단단한(Firm) 어조. 직설적인 개혁가에 맞습니다.
+        "direction": (
+            "Style: A Korean statesman in his forties who has spent his life pressing "
+            "the court for reform and being refused. Direct, clear, a little impatient, "
+            "but never shrill. He is used to being heard in a hall.\n"
+            "Pacing: Brisk and steady. He does not trail off.\n"
+            "Delivery: Firm mid register, clean consonants, emphasis on the verb that "
+            "carries the argument."
+        ),
     },
 }
+
+# 문서에 실린 30가지 사전 제작 음성. 사이드바에서 바꿔 들어볼 수 있습니다.
+GEMINI_VOICES = [
+    "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda",
+    "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus",
+    "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi",
+    "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima",
+    "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+]
+
+TTS_MODEL = "gemini-3.1-flash-tts-preview"
 
 # 원본의 "최대 세 문장 이하" 규칙을 고를 수 있게 뺐습니다.
 # 짧을수록 gTTS 변환도 빠릅니다.
@@ -289,6 +319,27 @@ with st.sidebar:
     )
 
     speak_answer = st.checkbox("답변을 음성으로 듣기", value=True)
+
+    voice_engine = "기본 음성 (gTTS)"
+    persona_voice = None
+    if speak_answer:
+        voice_engine = st.radio(
+            "음성 방식",
+            options=["인물별 목소리 (Gemini TTS)", "기본 음성 (gTTS)"],
+            index=0,
+        )
+        if voice_engine.startswith("인물별"):
+            default_voice = PERSONAS[persona_name]["voice"]
+            persona_voice = st.selectbox(
+                f"{persona_name}의 목소리",
+                options=GEMINI_VOICES,
+                index=GEMINI_VOICES.index(default_voice),
+                key=f"voice_{persona_name}",  # 인물마다 따로 기억합니다.
+            )
+            st.caption(
+                "Gemini TTS는 프리뷰라 속도 제한이 빡빡하고 가끔 실패합니다. "
+                "실패하면 기본 음성으로 자동 대체합니다. 오디오 출력은 글자보다 단가가 높습니다."
+            )
 
     st.divider()
     st.subheader("대화 관리")
@@ -524,6 +575,66 @@ def to_speech_text(text):
     return t.strip()
 
 
+def pcm_to_wav(pcm, rate=24000):
+    """Gemini TTS는 원시 PCM을 돌려주므로 재생 가능한 WAV로 감쌉니다."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+def build_tts_prompt(direction, script):
+    """연출 지시와 대사를 분리해 적습니다.
+
+    문서에 따르면 경계가 모호하면 모델이 연출 지시를 소리 내어 읽거나
+    안전 분류기가 요청을 거부할 수 있습니다. 그래서 대사 시작 지점을
+    명시적으로 표시합니다. 지시는 영어로 적는 편이 결과가 낫습니다.
+    """
+    return (
+        "Read the script below aloud as this character. "
+        "Do not read the profile or the notes.\n\n"
+        "# DIRECTOR'S NOTES\n"
+        f"{direction}\n"
+        "Accent: Standard Seoul Korean. The script is in Korean.\n\n"
+        "# SCRIPT (read only what follows this line)\n"
+        f"{script}"
+    )
+
+
+def synthesize_gemini(client, voice, direction, script):
+    """Gemini TTS로 음성을 만듭니다. 실패하면 사유를 함께 돌려줍니다.
+
+    문서가 밝힌 대로 아주 낮은 확률로 오디오 대신 텍스트 토큰이 돌아와
+    500으로 실패합니다. 그래서 한 번 다시 시도합니다.
+    """
+    last = None
+    for _ in range(2):
+        try:
+            interaction = client.interactions.create(
+                model=TTS_MODEL,
+                input=build_tts_prompt(direction, script),
+                response_format={"type": "audio"},
+                generation_config={"speech_config": [{"voice": voice}]},
+            )
+            data = getattr(getattr(interaction, "output_audio", None), "data", None)
+            if not data:
+                last = "오디오가 비어 있습니다."
+                continue
+            return pcm_to_wav(base64.b64decode(data)), None
+        except Exception as e:
+            last = f"{type(e).__name__}: {str(e)[:120]}"
+    return None, last
+
+
+def synthesize_gtts(script):
+    buf = io.BytesIO()
+    gTTS(text=script, lang="ko").write_to_fp(buf)
+    return buf.getvalue()
+
+
 pending = st.session_state.pending.get(persona_name)
 
 if pending:
@@ -578,9 +689,17 @@ if pending:
         if speak_answer:
             spoken = to_speech_text(answer)
             if spoken:
-                try:
-                    buffer = io.BytesIO()
-                    gTTS(text=spoken, lang="ko").write_to_fp(buffer)
-                    st.audio(buffer.getvalue(), format="audio/mp3", autoplay=True)
-                except Exception as e:
-                    st.caption(f"음성 변환은 건너뜁니다. ({e})")
+                audio, note = None, None
+                if voice_engine == "인물별 목소리 (Gemini TTS)":
+                    audio, note = synthesize_gemini(
+                        client, persona_voice, persona["direction"], spoken
+                    )
+                    if audio:
+                        st.audio(audio, format="audio/wav", autoplay=True)
+                    else:
+                        st.caption(f"인물 목소리를 만들지 못해 기본 음성으로 대신합니다. ({note})")
+                if audio is None:
+                    try:
+                        st.audio(synthesize_gtts(spoken), format="audio/mp3", autoplay=True)
+                    except Exception as e:
+                        st.caption(f"음성 변환은 건너뜁니다. ({e})")

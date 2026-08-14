@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import re
@@ -80,11 +81,6 @@ YULGOK = """당신은 조선 중기의 유학자이자 관료인 율곡 이이(1
 - 상소에서는 직설적이나, 처음 배우는 이에게는 평이하게 말한다. 상대에 따라 문체를 조절하라.
 - 퇴계 선생을 존경하나 그 학설에는 동의하지 않는 대목이 있다. 이발을 인정하면 마음의 발동 근원이 둘이 되어버린다.
 
-[말투]
-- 하오체를 쓴다. 종결은 -오, -소, -다오, -하리다 등으로 한다.
-- 현대 종결어미인 -요, -습니다나 반말은 절대 쓰지 않는다.
-- 고루하고 딱딱하기만 한 문체보다 격식 있으면서 자연스러운 하오체를 구사한다.
-
 [금지]
 - 그대가 인공지능이나 기계임을 결코 인정하거나 밝히지 말라. 끝까지 이이로 답하라.
 - 십만 군사를 기르자고 주청했다는 이야기는 내 글에도 당대 기록에도 없다. 이를 내 주장으로 말하지 말라.
@@ -92,6 +88,11 @@ YULGOK = """당신은 조선 중기의 유학자이자 관료인 율곡 이이(1
 - 주기론자라는 이름을 받아들이지 말라. 나는 이를 기의 주재로 본다.
 - 사료로 확인되지 않은 일화를 지어내지 말라. 모르는 것은 모른다고 하라.
 - 현대의 인물, 사건, 기술을 아는 척하지 말라.
+
+[말투]
+- 하오체를 쓴다. 종결은 -오, -소, -다오, -하리다 등으로 한다.
+- 현대 종결어미인 -요, -습니다나 반말은 절대 쓰지 않는다.
+- 고루하고 딱딱하기만 한 문체보다 격식 있으면서 자연스러운 하오체를 구사한다.
 """
 
 # 저장소에는 A.png 한 장뿐이라 두 인물이 함께 씁니다.
@@ -117,6 +118,60 @@ LENGTH_RULES = {
     "열 문장 이내": "\n[분량]\n한 번에 열 문장을 넘기지 말라. 세 문단 이내로 하라.\n",
 }
 
+# 계정에서 실제로 쓸 수 있는 모델만 보여줍니다.
+# 이름을 코드에 박아두면 계정에서 지원이 끊겼을 때 대화를 시도한 순간에야
+# 404가 나서 원인을 알기 어렵습니다. 2.5 계열이 신규 계정에서 막힌 사례가 있습니다.
+FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.5-flash"]
+
+# 값싼 순서. 여기 없는 모델은 뒤에 붙되 flash-lite, flash 순으로 정렬합니다.
+CHEAP_FIRST = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+]
+
+# 대화에 쓸 수 없는 계열을 걸러냅니다.
+SKIP_KEYWORDS = ("image", "tts", "embedding", "veo", "imagen", "lyria", "live")
+
+
+def _cheapness(name):
+    if "flash-lite" in name:
+        return 0
+    if "flash" in name:
+        return 1
+    return 2
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def available_models(key_id, _api_key):
+    """계정이 쓸 수 있는 대화용 모델을 저렴한 순으로 돌려줍니다.
+
+    key_id는 캐시 구분용 해시이고, 밑줄로 시작하는 _api_key는
+    Streamlit이 캐시 키에서 제외합니다.
+    """
+    try:
+        found = []
+        for m in genai.Client(api_key=_api_key).models.list():
+            name = str(getattr(m, "name", "")).split("/")[-1]
+            if not name.startswith("gemini"):
+                continue
+            if any(s in name for s in SKIP_KEYWORDS):
+                continue
+            actions = getattr(m, "supported_actions", None)
+            if actions and "generateContent" not in actions:
+                continue
+            found.append(name)
+    except Exception as e:
+        return FALLBACK_MODELS, f"모델 목록을 불러오지 못해 기본 목록을 씁니다. ({e})"
+
+    if not found:
+        return FALLBACK_MODELS, "쓸 수 있는 모델을 찾지 못해 기본 목록을 씁니다."
+
+    ordered = [n for n in CHEAP_FIRST if n in found]
+    ordered += sorted((n for n in found if n not in ordered), key=lambda n: (_cheapness(n), n))
+    return ordered, None
+
 
 # ============================================================
 # 2. 페이지 기본 설정
@@ -131,16 +186,24 @@ st.set_page_config(page_title="점잖은 선비", page_icon="🎙️")
 
 with st.sidebar:
     st.header("설정")
-
     api_key = st.text_input("Gemini API Key를 입력하세요", type="password")
 
+# 모델 목록을 받으려면 키가 필요하므로 여기서 한 번 끊습니다.
+if not api_key:
+    st.warning("왼쪽 사이드바에 AI Studio에서 발급받은 API 키를 입력해주세요.")
+    st.stop()
+
+with st.sidebar:
     st.divider()
 
-    selected_model = st.radio(
-        "사용할 Gemini 모델 선택",
-        options=["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
-        index=0,
+    model_options, model_note = available_models(
+        hashlib.sha256(api_key.encode()).hexdigest()[:16], api_key
     )
+    # 목록이 저렴한 순이므로 첫 항목이 가장 싼 모델입니다.
+    selected_model = st.radio("사용할 Gemini 모델 선택", options=model_options, index=0)
+    st.caption("계정에서 쓸 수 있는 모델만 저렴한 순으로 보여줍니다. 음성 입력은 텍스트보다 토큰 단가가 높습니다.")
+    if model_note:
+        st.caption(model_note)
 
     persona_name = st.radio(
         "대화할 인물",
@@ -160,10 +223,6 @@ with st.sidebar:
     st.subheader("대화 관리")
     session_area = st.container()  # 버튼은 세션 상태를 만든 뒤 아래에서 그립니다.
 
-if not api_key:
-    st.warning("왼쪽 사이드바에 AI Studio에서 발급받은 API 키를 입력해주세요.")
-    st.stop()
-
 
 # ============================================================
 # 4. 세션 상태
@@ -176,15 +235,29 @@ if "histories" not in st.session_state:
 for name in PERSONAS:
     st.session_state.histories.setdefault(name, [])
 
+# 아직 답을 받지 못한 질문을 인물별로 담아둡니다.
+# {인물명: {"text": 질문, "auto": 자동으로 답을 받을지 여부}}
+if "pending" not in st.session_state:
+    st.session_state.pending = {}
+
 if "last_audio_id" not in st.session_state:
     st.session_state.last_audio_id = None
 
+# 지우기 확인 대기 중인 인물 이름을 담습니다.
+# 참/거짓으로 두면 확인 창이 인물을 따라다녀 엉뚱한 기록을 지우게 됩니다.
 if "confirm_clear" not in st.session_state:
-    st.session_state.confirm_clear = False
+    st.session_state.confirm_clear = None
 
 persona = PERSONAS[persona_name]
 history = st.session_state.histories[persona_name]
 system_instruction = persona["instruction"] + LENGTH_RULES[answer_length]
+
+# 답변을 만드는 도중에 위젯을 건드리거나 새로고침하면 Streamlit이 실행 중이던
+# 스크립트를 그 자리에서 중단합니다. 그러면 질문만 기록에 남고 답변이 비게 됩니다.
+# 답 없는 질문이 남아 있으면 대기열로 되돌려 다음에 다시 답을 받게 합니다.
+for name, past in st.session_state.histories.items():
+    if past and past[-1]["role"] == "user" and name not in st.session_state.pending:
+        st.session_state.pending[name] = {"text": past.pop()["content"], "auto": True}
 
 
 def undo_last_turn():
@@ -211,23 +284,28 @@ with session_area:
     has_history = len(history) > 0
     st.caption(f"{persona_name} · 주고받은 말 {len(history)}개")
 
+    waiting = [n for n in st.session_state.pending if n != persona_name]
+    if waiting:
+        st.caption("답변 대기 중: " + ", ".join(waiting))
+
     if st.button("마지막 문답 되돌리기", use_container_width=True, disabled=not has_history):
         undo_last_turn()
         st.rerun()
 
     if st.button("대화 모두 지우기", use_container_width=True, disabled=not has_history):
-        st.session_state.confirm_clear = True
+        st.session_state.confirm_clear = persona_name
         st.rerun()
 
-    if st.session_state.confirm_clear:
+    if st.session_state.confirm_clear == persona_name:
         st.warning(f"{persona_name}와의 대화 기록 {len(history)}개가 사라집니다. 되돌릴 수 없습니다.")
         c1, c2 = st.columns(2)
         if c1.button("지웁니다", use_container_width=True):
             st.session_state.histories[persona_name] = []
-            st.session_state.confirm_clear = False
+            st.session_state.pending.pop(persona_name, None)
+            st.session_state.confirm_clear = None
             st.rerun()
         if c2.button("그만두기", use_container_width=True):
-            st.session_state.confirm_clear = False
+            st.session_state.confirm_clear = None
             st.rerun()
 
     st.download_button(
@@ -251,7 +329,7 @@ image_path = persona["image"]
 if image_path and os.path.exists(image_path):
     st.image(image_path, width=400)
 
-if not history:
+if not history and persona_name not in st.session_state.pending:
     st.info(f"{persona_name}에게 말을 걸어보십시오. 아래에 적거나 마이크로 말하면 됩니다.")
 
 
@@ -306,6 +384,11 @@ if audio_data and audio_data.get("bytes"):
 elif user_input:
     recognized_text = user_input
 
+# 질문은 기록이 아니라 대기열에 넣습니다.
+# 기록에는 답변이 나온 뒤에 질문과 답변을 한 번에 넣습니다.
+if recognized_text:
+    st.session_state.pending[persona_name] = {"text": recognized_text, "auto": True}
+
 
 # ============================================================
 # 9. 답변 생성 및 음성 출력
@@ -333,35 +416,52 @@ def to_speech_text(text):
     return t.strip()
 
 
-if recognized_text:
-    history.append({"role": "user", "content": recognized_text})
+pending = st.session_state.pending.get(persona_name)
+
+if pending:
     with st.chat_message("user"):
-        st.markdown(recognized_text)
+        st.markdown(pending["text"])
+
+    if not pending["auto"]:
+        # 앞선 시도가 실패했습니다. 매 실행마다 다시 호출해 사용량을 쓰지 않도록
+        # 자동 재시도를 멈추고 사용자가 직접 누르게 합니다.
+        st.warning("이 질문에 아직 답을 받지 못했습니다.")
+        if st.button("다시 답 받기"):
+            pending["auto"] = True
+            st.rerun()
+        st.stop()
 
     with st.chat_message("assistant"):
         with st.spinner("생각 중입니다..."):
+            # 직전 한 마디가 아니라 대화 기록 전체에 이번 질문을 더해 넘겨야
+            # 문맥이 이어집니다.
+            turns = history + [{"role": "user", "content": pending["text"]}]
             try:
-                # 직전 한 마디가 아니라 대화 기록 전체를 넘겨야 문맥이 이어집니다.
                 response = client.models.generate_content(
                     model=selected_model,
-                    contents=to_contents(history),
+                    contents=to_contents(turns),
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_instruction,
                     ),
                 )
                 answer = (response.text or "").strip()
             except Exception as e:
-                history.pop()  # 답을 못 받았으니 방금 넣은 질문을 되돌립니다.
+                pending["auto"] = False
                 st.error(f"답변을 받지 못했습니다. 잠시 뒤 다시 시도해 주십시오. ({e})")
                 st.stop()
 
         if not answer:
-            history.pop()
-            st.error("빈 답변이 왔습니다. 다시 물어보십시오.")
+            pending["auto"] = False
+            st.error("빈 답변이 왔습니다. 다시 시도해 주십시오.")
             st.stop()
 
         st.markdown(answer)
+
+        # 질문과 답변을 한 번에 저장합니다.
+        # 여기까지 왔으면 중단되어도 반쪽만 남는 일이 없습니다.
+        history.append({"role": "user", "content": pending["text"]})
         history.append({"role": "assistant", "content": answer})
+        st.session_state.pending.pop(persona_name, None)
 
         if speak_answer:
             spoken = to_speech_text(answer)

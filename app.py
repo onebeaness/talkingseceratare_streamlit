@@ -1,7 +1,9 @@
 import hashlib
 import io
+import json
 import os
 import re
+import secrets
 
 import streamlit as st
 from google import genai
@@ -172,6 +174,75 @@ def available_models(key_id, _api_key):
     ordered += sorted((n for n in found if n not in ordered), key=lambda n: (_cheapness(n), n))
     return ordered, None
 
+# ============================================================
+# 1-2. 대화 보관
+# ============================================================
+# st.session_state는 서버 메모리에만 있어 새로고침하면 사라집니다.
+# URL에 무작위 식별자를 붙여두고 문답이 오갈 때마다 파일로 남깁니다.
+# 주소만 유지되면 새로고침해도 대화를 되찾습니다.
+#
+# 다만 Streamlit Community Cloud는 앱이 잠들거나 다시 배포되면
+# 파일 시스템이 초기화됩니다. 오래 두고 볼 대화는 백업 내려받기로
+# JSON을 받아두시고, 필요할 때 불러오기로 되돌리십시오.
+
+SAVE_DIR = os.environ.get("SEONBI_SAVE_DIR", ".conversations")
+SID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
+
+
+def session_id():
+    """이 브라우저 주소에 묶인 보관 식별자를 돌려줍니다."""
+    if "sid" in st.session_state:
+        return st.session_state.sid
+    sid = str(st.query_params.get("s") or "")
+    if not SID_PATTERN.match(sid):
+        sid = secrets.token_hex(8)
+    st.session_state.sid = sid  # 먼저 넣어야 주소 갱신이 되풀이되지 않습니다.
+    if str(st.query_params.get("s") or "") != sid:
+        st.query_params["s"] = sid
+    return sid
+
+
+def _save_path(sid):
+    return os.path.join(SAVE_DIR, f"{sid}.json")
+
+
+def clean_histories(data):
+    """바깥에서 들어온 자료를 걸러 신뢰할 수 있는 모양으로 맞춥니다."""
+    out = {}
+    for name, msgs in (data or {}).items():
+        if name not in PERSONAS or not isinstance(msgs, list):
+            continue
+        kept = [
+            {"role": m["role"], "content": str(m["content"])}
+            for m in msgs
+            if isinstance(m, dict)
+            and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+        ]
+        out[name] = kept
+    return out
+
+
+def load_saved(sid):
+    try:
+        with open(_save_path(sid), encoding="utf-8") as f:
+            return clean_histories(json.load(f).get("histories"))
+    except Exception:
+        return {}
+
+
+def save_now(sid, histories):
+    """임시 파일에 쓰고 교체합니다. 쓰는 도중 멈춰도 기존 파일이 깨지지 않습니다."""
+    try:
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        tmp = _save_path(sid) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"histories": histories}, f, ensure_ascii=False)
+        os.replace(tmp, _save_path(sid))
+        return None
+    except Exception as e:
+        return str(e)
+
 
 # ============================================================
 # 2. 페이지 기본 설정
@@ -230,8 +301,10 @@ with st.sidebar:
 # 인물별로 대화 기록을 따로 둡니다.
 # 인물을 바꿔도 이전 대화가 지워지지 않고, 되돌아오면 그대로 이어집니다.
 
+sid = session_id()
+
 if "histories" not in st.session_state:
-    st.session_state.histories = {}
+    st.session_state.histories = load_saved(sid)  # 새로고침 뒤에도 이어집니다.
 for name in PERSONAS:
     st.session_state.histories.setdefault(name, [])
 
@@ -290,6 +363,7 @@ with session_area:
 
     if st.button("마지막 문답 되돌리기", use_container_width=True, disabled=not has_history):
         undo_last_turn()
+        save_now(sid, st.session_state.histories)
         st.rerun()
 
     if st.button("대화 모두 지우기", use_container_width=True, disabled=not has_history):
@@ -303,6 +377,7 @@ with session_area:
             st.session_state.histories[persona_name] = []
             st.session_state.pending.pop(persona_name, None)
             st.session_state.confirm_clear = None
+            save_now(sid, st.session_state.histories)
             st.rerun()
         if c2.button("그만두기", use_container_width=True):
             st.session_state.confirm_clear = None
@@ -316,6 +391,39 @@ with session_area:
         use_container_width=True,
         disabled=not has_history,
     )
+
+    st.divider()
+    st.subheader("백업")
+    st.caption(
+        "이 주소를 북마크해두면 새로고침해도 대화가 남습니다. "
+        "다만 앱이 다시 배포되면 서버 저장분은 사라지니, 오래 둘 대화는 백업을 받아두십시오."
+    )
+
+    any_history = any(st.session_state.histories.values())
+    st.download_button(
+        "백업 내려받기",
+        data=json.dumps({"histories": st.session_state.histories}, ensure_ascii=False, indent=2),
+        file_name="점잖은선비_백업.json",
+        mime="application/json",
+        use_container_width=True,
+        disabled=not any_history,
+    )
+
+    uploaded = st.file_uploader("백업 불러오기", type=["json"], label_visibility="collapsed")
+    if uploaded is not None and st.button("불러온 백업으로 되돌리기", use_container_width=True):
+        try:
+            restored = clean_histories(json.loads(uploaded.getvalue().decode("utf-8")).get("histories"))
+        except Exception as e:
+            restored = None
+            st.error(f"백업 파일을 읽지 못했습니다. 내려받은 JSON이 맞는지 확인해 주십시오. ({e})")
+        if restored:
+            for name in PERSONAS:
+                st.session_state.histories[name] = restored.get(name, [])
+            st.session_state.pending.clear()
+            save_now(sid, st.session_state.histories)
+            st.rerun()
+        elif restored is not None:
+            st.error("백업에서 되살릴 대화를 찾지 못했습니다.")
 
 
 # ============================================================
@@ -462,6 +570,10 @@ if pending:
         history.append({"role": "user", "content": pending["text"]})
         history.append({"role": "assistant", "content": answer})
         st.session_state.pending.pop(persona_name, None)
+
+        save_error = save_now(sid, st.session_state.histories)
+        if save_error:
+            st.caption(f"이번 대화를 서버에 남기지 못했습니다. 백업을 받아두십시오. ({save_error})")
 
         if speak_answer:
             spoken = to_speech_text(answer)

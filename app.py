@@ -186,8 +186,10 @@ if "pending" not in st.session_state:
 if "last_audio_id" not in st.session_state:
     st.session_state.last_audio_id = None
 
+# 지우기 확인 대기 중인 인물 이름을 담습니다.
+# 참/거짓으로 두면 확인 창이 인물을 따라다녀 엉뚱한 기록을 지우게 됩니다.
 if "confirm_clear" not in st.session_state:
-    st.session_state.confirm_clear = False
+    st.session_state.confirm_clear = None
 
 persona = PERSONAS[persona_name]
 history = st.session_state.histories[persona_name]
@@ -234,19 +236,19 @@ with session_area:
         st.rerun()
 
     if st.button("대화 모두 지우기", use_container_width=True, disabled=not has_history):
-        st.session_state.confirm_clear = True
+        st.session_state.confirm_clear = persona_name
         st.rerun()
 
-    if st.session_state.confirm_clear:
+    if st.session_state.confirm_clear == persona_name:
         st.warning(f"{persona_name}와의 대화 기록 {len(history)}개가 사라집니다. 되돌릴 수 없습니다.")
         c1, c2 = st.columns(2)
         if c1.button("지웁니다", use_container_width=True):
             st.session_state.histories[persona_name] = []
             st.session_state.pending.pop(persona_name, None)
-            st.session_state.confirm_clear = False
+            st.session_state.confirm_clear = None
             st.rerun()
         if c2.button("그만두기", use_container_width=True):
-            st.session_state.confirm_clear = False
+            st.session_state.confirm_clear = None
             st.rerun()
 
     st.download_button(

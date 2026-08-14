@@ -136,11 +136,13 @@ with st.sidebar:
 
     st.divider()
 
+    # 기본값은 가장 저렴한 모델입니다. 답변 품질이 아쉬우면 아래 항목으로 올리십시오.
     selected_model = st.radio(
         "사용할 Gemini 모델 선택",
-        options=["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
+        options=["gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.5-flash"],
         index=0,
     )
+    st.caption("flash-lite가 가장 저렴합니다. 음성 입력은 텍스트보다 토큰 단가가 높습니다.")
 
     persona_name = st.radio(
         "대화할 인물",
